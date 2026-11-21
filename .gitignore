@@ -1,0 +1,29 @@
+node_modules/
+dist/
+keys/
+proxy/greengate-sheets.json
+proxy/greengate.json
+proxy/urllog-state.json
+proxy/urls.jsonl
+proxy/__pycache__/
+proxy/channel-ids.json
+.venv-proxy/
+setup/__pycache__/
+server/.wrangler/
+server/node_modules/
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+__pycache__/
+*.pyc
+
+# Android: signing key and built binaries stay out of git (public repo); APK goes to Releases
+android/keystore/
+android/dist/
+android/app/release/
+android/tools/.venv/
+android/tools/parent.json
+
+# local dev config of the proxy addon
+proxy/greengate.json

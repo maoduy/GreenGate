@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">GreenGate</string>
+    <string name="tagline">Chỉ cho phép những trang web trong Google Sheet của gia đình. Cài một lần, quản lý bằng Sheet.</string>
+    <string name="sheet_label">1. Google Sheet điều khiển</string>
+    <string name="sheet_hint">Dán link hoặc id của Google Sheet</string>
+    <string name="relay_label">2. Máy chủ chuyển tin (tuỳ chọn, cho ảnh màn hình và lịch sử)</string>
+    <string name="relay_hint">https://relay.greengate.vn</string>
+    <string name="check">Kiểm tra</string>
+    <string name="checking">Đang kiểm tra…</string>
+    <string name="enable">Bật bảo vệ</string>
+    <string name="disable">Tắt bảo vệ</string>
+    <string name="pair">Ghép đôi với phụ huynh</string>
+    <string name="status_off">Chưa bật bảo vệ.</string>
+    <string name="steps_title">3. Quyền cần cấp</string>
+    <string name="step_vpn">Bộ lọc mạng (VPN cục bộ)</string>
+    <string name="step_access">Chặn ứng dụng và chụp màn hình (Trợ năng)</string>
+    <string name="step_admin">Chống gỡ cài đặt (Quản trị thiết bị)</string>
+    <string name="granted">đã cấp</string>
+    <string name="missing">chưa cấp</string>
+    <string name="accessibility_label">GreenGate: chặn ứng dụng, chụp màn hình</string>
+    <string name="accessibility_description">GreenGate dùng dịch vụ trợ năng để đóng các ứng dụng mà phụ huynh đã chặn trong Google Sheet và để chụp ảnh màn hình khi phụ huynh yêu cầu. Con luôn được báo mỗi lần chụp. Không có chế độ ẩn.</string>
+    <string name="notif_channel">Bảo vệ GreenGate</string>
+    <string name="notif_title">GreenGate đang bảo vệ máy này</string>
+    <string name="notif_text">Trang web được lọc theo Google Sheet của gia đình. Chạm để xem.</string>
+    <string name="toast_blocked_app">GreenGate: ứng dụng này bị chặn</string>
+    <string name="toast_screenshot">GreenGate: phụ huynh vừa chụp ảnh màn hình</string>
+    <string name="pair_title">Ghép đôi</string>
+    <string name="pair_explain">Trên web app phụ huynh, chọn "Thêm thiết bị" và nhập mã này (hoặc quét QR). Mã hết hạn sau 10 phút.</string>
+    <string name="pair_waiting">Đang lấy mã…</string>
+    <string name="pair_done">Đã ghép đôi với %1$d phụ huynh.</string>
+    <string name="pair_error">Không kết nối được máy chủ chuyển tin: %1$s</string>
+    <string name="paused_until">Đang tạm dừng đến %1$s</string>
+    <string name="consent_title">4. Đồng ý về ảnh màn hình</string>
+    <string name="consent_explain">Máy này sẽ tự chụp màn hình theo lịch trong Google Sheet (mặc định mỗi 15 phút, chỉ khi màn hình đang mở) và khi bố mẹ yêu cầu. Ảnh được lưu vào thư mục Google Drive của gia đình. Mỗi lần chụp đều có thông báo trên máy. Cần cả hai cùng đồng ý; chưa đủ thì không chụp theo lịch.</string>
+    <string name="consent_parent">Bố mẹ đồng ý</string>
+    <string name="consent_child">Con đã được giải thích và đồng ý</string>
+    <string name="shots_channel">Thông báo chụp màn hình</string>
+    <string name="shots_channel_desc">Hiện mỗi lần GreenGate chụp màn hình (theo lịch hoặc do bố mẹ), tự tắt sau 8 giây.</string>
+    <string name="shot_schedule">GreenGate chụp màn hình theo lịch (mỗi %1$d phút)</string>
+    <string name="shot_parent">Bố mẹ vừa chụp màn hình</string>
+    <string name="shot_footer">Ảnh được lưu vào Google Drive của gia đình.</string>
+</resources>

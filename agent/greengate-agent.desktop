@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GreenGate agent
+Comment=Chụp màn hình và lịch sử theo yêu cầu của bố mẹ (GreenGate)
+Exec=/opt/greengate/venv/bin/python /opt/greengate/agent/greengate_agent.py run
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

@@ -1,0 +1,38 @@
+name: Build category lists
+
+# Compiles blocklists/sources.json into one <category>.txt.gz + <category>.bin per category and
+# publishes them as assets of the release tagged "lists" (replaced every day). Devices download
+# only from there, never from the dozens of upstream sources.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'      # daily, 03:17 UTC
+  push:
+    branches: [main]
+    paths: ['blocklists/**', '.github/workflows/build-lists.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile every category
+        run: python3 blocklists/build.py out
+      - name: Show what was built
+        run: |
+          python3 -c "import json; [print('%-18s %9d domains' % (k, v['count'])) for k, v in json.load(open('out/index.json')).items()]"
+          ls -la out | awk '{print $5, $9}'
+      - name: Publish on the 'lists' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view lists >/dev/null 2>&1 || gh release create lists --title "Danh sách danh mục (tự cập nhật hàng ngày)" \
+            --notes "Các tệp này được máy con tải về mỗi ngày. Nguồn và giấy phép: blocklists/sources.json." --latest=false
+          gh release upload lists out/*.txt.gz out/*.bin out/index.json --clobber

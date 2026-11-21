@@ -1,0 +1,28 @@
+[Unit]
+Description=GreenGate - web filter for the children's accounts
+Documentation=https://github.com/maoduy/GreenGate
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Its own account, so the nftables rules can exempt the proxy's own traffic by uid.
+User=greengate
+Group=greengate
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=/var/lib/greengate
+ExecStartPre=+/usr/local/lib/greengate/nft-apply.sh
+# transparent listener for the redirected traffic + a regular one on the next port for the local
+# control page (greengate update/status, watchdog, agent); the latter works without conntrack.
+ExecStart=/opt/greengate/venv/bin/mitmdump --mode transparent@127.0.0.1:8080 --mode regular@127.0.0.1:8081 --set confdir=/var/lib/greengate/ca -s /opt/greengate/proxy/greengate.py -q
+ExecStopPost=+/usr/local/lib/greengate/nft-apply.sh --remove
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/greengate
+PrivateTmp=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

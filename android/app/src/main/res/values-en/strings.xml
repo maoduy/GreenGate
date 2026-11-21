@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tagline">Only the websites in your family\'s Google Sheet are allowed. Install once, manage from the Sheet.</string>
+    <string name="sheet_label">1. Control Google Sheet</string>
+    <string name="sheet_hint">Paste the Google Sheet link or id</string>
+    <string name="relay_label">2. Relay server (optional, for screenshots and history)</string>
+    <string name="check">Check</string>
+    <string name="checking">Checking…</string>
+    <string name="enable">Enable protection</string>
+    <string name="disable">Disable protection</string>
+    <string name="pair">Pair with a parent</string>
+    <string name="status_off">Protection is off.</string>
+    <string name="steps_title">3. Permissions</string>
+    <string name="step_vpn">Network filter (local VPN)</string>
+    <string name="step_access">App blocking and screenshots (Accessibility)</string>
+    <string name="step_admin">Uninstall protection (Device admin)</string>
+    <string name="granted">granted</string>
+    <string name="missing">missing</string>
+    <string name="accessibility_label">GreenGate: block apps, take screenshots</string>
+    <string name="accessibility_description">GreenGate uses the accessibility service to close apps the parents blocked in the Google Sheet and to take a screenshot when a parent asks. The child is told every time. There is no hidden mode.</string>
+    <string name="notif_channel">GreenGate protection</string>
+    <string name="notif_title">GreenGate is protecting this device</string>
+    <string name="notif_text">Websites are filtered by your family\'s Google Sheet. Tap to see.</string>
+    <string name="toast_blocked_app">GreenGate: this app is blocked</string>
+    <string name="toast_screenshot">GreenGate: a parent just took a screenshot</string>
+    <string name="pair_title">Pairing</string>
+    <string name="pair_explain">In the parent web app choose "Add device" and type this code (or scan the QR). It expires in 10 minutes.</string>
+    <string name="pair_waiting">Getting a code…</string>
+    <string name="pair_done">Paired with %1$d parent(s).</string>
+    <string name="pair_error">Cannot reach the relay: %1$s</string>
+    <string name="paused_until">Paused until %1$s</string>
+</resources>

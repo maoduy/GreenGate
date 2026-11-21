@@ -1,0 +1,32 @@
+:root { --green: #1b7f4f; --bg: #f4f7f5; --card: #fff; --text: #1d2a22; --muted: #667; --line: #dde5df; --red: #b3261e; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+header { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 2; }
+.brand { font-weight: 700; color: var(--green); text-decoration: none; display: flex; align-items: center; gap: 8px; font-size: 18px; }
+nav a { margin-left: 12px; color: var(--text); text-decoration: none; font-size: 14px; }
+nav a:hover { color: var(--green); }
+main { max-width: 860px; margin: 0 auto; padding: 16px; }
+footer { text-align: center; padding: 20px; font-size: 12px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 14px; }
+h1 { font-size: 20px; margin: 0 0 8px; } h2 { font-size: 16px; margin: 0 0 10px; }
+.muted { color: var(--muted); font-size: 13px; }
+button, .btn { background: var(--green); color: #fff; border: 0; border-radius: 9px; padding: 10px 14px; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-block; }
+button.secondary { background: #e7efe9; color: var(--text); }
+button.danger { background: var(--red); }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+input, select { font: inherit; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; min-width: 0; flex: 1; }
+input.code { font-size: 26px; letter-spacing: 6px; text-align: center; max-width: 220px; }
+.device { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #aaa; margin-right: 6px; }
+.dot.on { background: #2bb673; }
+.timing { font-family: ui-monospace, Consolas, monospace; font-size: 12px; background: #f0f4f1; border-radius: 8px; padding: 8px; white-space: pre-wrap; }
+img.shot { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); margin-top: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.wrap { overflow-x: auto; }
+.err { color: var(--red); }
+.ok { color: var(--green); }
+video { width: 100%; max-width: 420px; border-radius: 10px; }
+textarea { width: 100%; font: 12px ui-monospace, monospace; min-height: 70px; }
+@media (max-width: 600px) { nav a { margin-left: 8px; font-size: 13px; } }

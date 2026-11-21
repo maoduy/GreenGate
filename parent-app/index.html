@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1b7f4f">
+<title>GreenGate - Bố mẹ</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+<!-- tweetnacl: nacl.box = X25519 + XSalsa20-Poly1305, the same construction the devices use -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tweetnacl/1.0.3/nacl-fast.min.js"
+        integrity="sha512-aLSwsdjU35MF6PERT7Pic3+X6qL7O+Us8hYQl/gjrPoV4JXUNoCF2Ys3/vfJSiBW1QNxz2WTr4tEo5VcOdHt/g==" crossorigin="anonymous"></script>
+</head>
+<body>
+<header>
+  <a href="#/" class="brand"><img src="icon.svg" alt="" width="28" height="28"> GreenGate</a>
+  <nav>
+    <a href="#/">Thiết bị</a>
+    <a href="#/pair">Thêm máy</a>
+    <a href="#/settings">Cài đặt</a>
+    <a href="#/keys">Khoá</a>
+  </nav>
+</header>
+<main id="app"><p class="muted">Đang tải...</p></main>
+<footer class="muted">Dữ liệu của con chỉ giải mã được trên máy này. Relay chỉ chuyển gói đã khoá.</footer>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+{
+  "comment": "weekday 0=Mon..6=Sun; minute = minute of day. 'error' = text must be rejected.",
+  "cases": [
+    {"text": "", "weekday": 2, "minute": 60, "allowed": true},
+    {"text": "07:00-21:00", "weekday": 0, "minute": 420, "allowed": true},
+    {"text": "07:00-21:00", "weekday": 0, "minute": 419, "allowed": false},
+    {"text": "07:00-21:00", "weekday": 6, "minute": 1259, "allowed": true},
+    {"text": "07:00-21:00", "weekday": 6, "minute": 1260, "allowed": false},
+    {"text": "17:00-20:00 T2-T6; 08:00-22:00 T7,CN", "weekday": 0, "minute": 1080, "allowed": true},
+    {"text": "17:00-20:00 T2-T6; 08:00-22:00 T7,CN", "weekday": 0, "minute": 600, "allowed": false},
+    {"text": "17:00-20:00 T2-T6; 08:00-22:00 T7,CN", "weekday": 5, "minute": 600, "allowed": true},
+    {"text": "17:00-20:00 T2-T6; 08:00-22:00 T7,CN", "weekday": 6, "minute": 1300, "allowed": true},
+    {"text": "17:00-20:00 T2-T6; 08:00-22:00 T7,CN", "weekday": 6, "minute": 1320, "allowed": false},
+    {"text": "21:00-06:00", "weekday": 3, "minute": 1300, "allowed": true},
+    {"text": "21:00-06:00", "weekday": 3, "minute": 120, "allowed": true},
+    {"text": "21:00-06:00", "weekday": 3, "minute": 360, "allowed": false},
+    {"text": "21:00-06:00 T6", "weekday": 5, "minute": 120, "allowed": true},
+    {"text": "21:00-06:00 T6", "weekday": 6, "minute": 120, "allowed": false},
+    {"text": "09h00-11h30 Mon,Wed", "weekday": 2, "minute": 600, "allowed": true},
+    {"text": "09h00-11h30 Mon,Wed", "weekday": 1, "minute": 600, "allowed": false},
+    {"text": "00:00-24:00", "weekday": 4, "minute": 1439, "allowed": true},
+    {"text": "7:00-21:00 CN-T3", "weekday": 6, "minute": 500, "allowed": true},
+    {"text": "7:00-21:00 CN-T3", "weekday": 1, "minute": 500, "allowed": true},
+    {"text": "7:00-21:00 CN-T3", "weekday": 2, "minute": 500, "allowed": false},
+    {"text": "7-21", "error": true},
+    {"text": "07:00-25:00", "error": true},
+    {"text": "07:00-21:00 T9", "error": true}
+  ]
+}

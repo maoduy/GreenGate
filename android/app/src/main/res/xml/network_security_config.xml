@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext allowed so a family can point the app at a self-hosted relay or a local
+     test server on their LAN; Google Sheets and the public relay are always HTTPS. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

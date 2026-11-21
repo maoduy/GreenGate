@@ -1,0 +1,153 @@
+name: Build GreenGate Setup.exe
+
+# The installer has to be built on Windows - PyInstaller does not cross-compile.
+# Everything the installer needs is baked into the exe, so the people you share it
+# with need nothing on their PC: no Python, no downloads, just the exe and a sheet link.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'setup/**'
+      - 'proxy/**'
+      - 'agent/**'
+      - '.github/workflows/build-setup.yml'
+
+permissions:
+  contents: write
+
+env:
+  MITM_VERSION: '12.2.3'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller and the agent's dependencies
+        run: pip install --disable-pip-version-check pyinstaller==6.11.1 -r agent/requirements.txt certifi
+
+      - name: Build GreenGate-Agent.exe
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean agent\greengate-agent.spec
+          if (-not (Test-Path dist\GreenGate-Agent.exe)) { throw "agent exe not built" }
+          Copy-Item proxy\timewindow.py dist\ -Force
+
+      - name: Build mitmdump.exe without WinDivert
+        shell: pwsh
+        run: |
+          # The official mitmdump.exe bundles mitmproxy_windows (the WinDivert driver, used
+          # only for transparent/local mode, which GreenGate never uses). Windows Defender
+          # quarantines that file as Trojan:Win64/WinDivert - on a fresh Windows 11 Home it
+          # did so at the first definition update after install, killing the proxy and
+          # leaving the child unfiltered. So we build our own mitmdump from the same
+          # release, minus that package, and let the runner's Defender confirm it is clean.
+          pip install --disable-pip-version-check "mitmproxy==$env:MITM_VERSION"
+          # mitmproxy_rs imports mitmproxy_windows at import time (for executable_path()),
+          # so the package must exist - just without the driver and the redirector in it.
+          $mw = python -c "import mitmproxy_windows, os; print(os.path.dirname(mitmproxy_windows.__file__))"
+          Get-ChildItem $mw -Include *.dll, *.sys, *.lib, *.exe, WINDIVERT_VERSION -Recurse | Remove-Item -Force
+          # pydivert (transparent mode on Windows, also unused) ships the same driver and is
+          # imported by mitmproxy.platform at load time: drop the package and that import.
+          pip uninstall -y pydivert
+          $plat = python -c "import mitmproxy, os; print(os.path.join(os.path.dirname(mitmproxy.__file__), 'platform', '__init__.py'))"
+          (Get-Content $plat -Raw) -replace 'elif sys.platform == "win32":', 'elif False:  # GreenGate: no transparent mode, no WinDivert' | Set-Content $plat -NoNewline
+          python -c "import mitmproxy.platform as p; assert p.original_addr is None; print('transparent mode disabled')"
+          Write-Host "mitmproxy_windows now holds: $((Get-ChildItem $mw | ForEach-Object Name) -join ', ')"
+          $hooks = python -c "import mitmproxy.utils.pyinstaller as p; print(p.hook_dirs()[0])"
+          Set-Content build-mitmdump.py "from mitmproxy.tools.main import mitmdump`nmitmdump()"
+          pyinstaller --noconfirm --clean --onefile --console --name mitmdump `
+            --additional-hooks-dir "$hooks" --exclude-module pydivert --exclude-module mitmproxy.platform.windows `
+            --collect-all mitmproxy --hidden-import certifi --collect-data certifi build-mitmdump.py
+          # belt and braces: no WinDivert bytes may be inside the archive we ship
+          $toc = Get-Content build\mitmdump\PKG-00.toc -Raw -ErrorAction SilentlyContinue
+          if ($toc -cmatch 'WinDivert|windows-redirector') { throw "WinDivert files still bundled" }
+          if (-not (Test-Path dist\mitmdump.exe)) { throw "mitmdump.exe not built" }
+          & dist\mitmdump.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "the built mitmdump does not start" }
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (Test-Path $mp) {
+            & $mp -SignatureUpdate | Out-Null
+            & $mp -Scan -ScanType 3 -File "$PWD\dist\mitmdump.exe" -DisableRemediation
+            if ($LASTEXITCODE -ne 0) { throw "Defender still objects to the built mitmdump.exe (exit $LASTEXITCODE)" }
+            Write-Host "Defender: mitmdump.exe is clean"
+          }
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item dist\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          Copy-Item dist\GreenGate-Agent.exe payload\ -Force
+          Get-ChildItem payload | Format-Table Name, Length
+
+      - name: Build the exe
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --uac-admin `
+            --name "GreenGate-Setup" `
+            --hidden-import certifi --collect-data certifi `
+            --add-data "payload\install.ps1;." `
+            --add-data "payload\uninstall.ps1;." `
+            --add-data "payload\greengate.py;." `
+            --add-data "payload\sheetlog.py;." `
+            --add-data "payload\greengate.cmd;." `
+            --add-data "payload\reset-clean.ps1;." `
+            --add-data "payload\diagnose.ps1;." `
+            --add-data "payload\GreenGate-Unlock.bat;." `
+            --add-data "payload\greengate-pause.ps1;." `
+            --add-data "payload\greengate-watchdog.ps1;." `
+            --add-data "payload\greengate-test.ps1;." `
+            --add-data "payload\greengate-supervisor.ps1;." `
+            --add-data "payload\greengate-policy.ps1;." `
+            --add-data "payload\mitmdump.exe;." `
+            --add-data "payload\GreenGate-Agent.exe;." `
+            --add-data "payload\policy.py;." `
+            --add-data "payload\timewindow.py;." `
+            setup\greengate_setup.py
+
+      - name: Check the result
+        shell: pwsh
+        run: |
+          $exe = "dist\GreenGate-Setup.exe"
+          if (-not (Test-Path $exe)) { throw "build produced no exe" }
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "Built $exe  ($mb MB)"
+          if ($mb -lt 10) { throw "exe is only $mb MB - the payload did not get bundled" }
+          Copy-Item dist\GreenGate-Agent.exe dist\GreenGate-Agent-standalone.exe
+
+      - name: Also pack a password-protected zip
+        shell: pwsh
+        run: |
+          # Browsers and Defender block a bare unsigned .exe. They cannot inspect an
+          # encrypted archive, so this one downloads without a fight. ZipCrypto, not
+          # AES, because more tools can open it.
+          & "$env:ProgramFiles\7-Zip\7z.exe" a -tzip -p123456 `
+            "dist\GreenGate-Setup.zip" "dist\GreenGate-Setup.exe" | Out-Null
+          if (-not (Test-Path "dist\GreenGate-Setup.zip")) { throw "zip not produced" }
+          $mb = [math]::Round((Get-Item "dist\GreenGate-Setup.zip").Length / 1MB, 1)
+          Write-Host "Packed dist\GreenGate-Setup.zip ($mb MB, password 123456)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GreenGate-Setup
+          path: |
+            dist/GreenGate-Setup.exe
+            dist/GreenGate-Agent.exe
+          retention-days: 90
+
+      - name: Publish as the 'latest' release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag 2>$null
+          gh release create latest "dist\GreenGate-Setup.exe" "dist\GreenGate-Setup.zip" "dist\GreenGate-Agent.exe" "payload\mitmdump.exe" "setup\reset-clean.ps1" "proxy\diagnose.ps1" "setup\GreenGate-Unlock.bat" `
+            --title "GreenGate Setup (latest)" `
+            --notes "**GreenGate-Setup.exe** - one-click installer. Download, run, paste your Google Sheet link, pick the accounts to protect.`n`n**reset-clean.ps1** - only if an older version was installed: run it as Administrator first to clear everything out. It backs up to your Desktop and writes a restore.cmd.`n`n**GreenGate-Setup.zip** - the same exe inside a password-protected zip (password ``123456``), for when the browser or Defender refuses the plain .exe. Needs 7-Zip or WinRAR to extract.`n`nBuilt from $env:GITHUB_SHA."

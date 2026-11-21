@@ -1,0 +1,640 @@
+name: Test matrix
+
+# Four scenarios: two Windows generations x two enforcement modes.
+#
+# GitHub offers no Windows 10/11 CLIENT images, only Server, and windows-2019 - the
+# Windows 10 generation - was retired: jobs requesting it queue forever. So this covers
+# the Windows 11 generation only (2022 and 2025).
+#
+# What that leaves untested: the Windows 10 build, and anything client-only (S mode,
+# Family Safety, an OEM antivirus). The one bug this caught - ctypes truncating 64-bit
+# handles - depends on the architecture, not the Windows version, so it would behave the
+# same on 10; that is reasoning, not evidence.
+#
+# The "all users" mode filters a PURPOSE-MADE administrator account, never the runner's
+# own: routing the runner through the proxy would cut off the job itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: 'Control sheet id or link'
+        required: true
+        default: '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs'
+
+env:
+  MITM_VERSION: '12.2.3'
+  KIDUSER: 'kidtest'
+  ADMUSER: 'admintest'
+  TESTPASS: 'K1dN3st-Test!2026'
+  LISTED: 'https://www.google.com/'
+  UNLISTED: 'https://example.com/'
+
+jobs:
+  scenario:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        mode: [standard-only, all-users]
+    name: ${{ matrix.os }} / ${{ matrix.mode }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+
+      - name: Create the two test accounts
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+            Add-LocalGroupMember -Group "Users" -Member $u -EA SilentlyContinue
+            # Only the admin gets a profile up front. The kid deliberately has NEVER logged in,
+            # the way a parent sets things up at home: install.ps1 must create that profile
+            # itself (greengate-policy.ps1) or the child ends up unfiltered.
+            if ($u -eq $env:ADMUSER) {
+              $c = New-Object PSCredential($u, $sec)
+              Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+            }
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $env:ADMUSER
+          Write-Host "kid   : $env:KIDUSER (standard)"
+          Write-Host "admin : $env:ADMUSER (Administrators)  - NOT the runner's own account"
+
+      - name: Install
+        # powershell, NOT pwsh: real machines run Windows PowerShell 5.1, whose
+        # Set-Content -Encoding UTF8 writes a BOM. pwsh does not, so testing under it
+        # hid a config file the addon could not parse.
+        shell: powershell
+        run: |
+          $enforce = if ("${{ matrix.mode }}" -eq "all-users") { "$env:KIDUSER,$env:ADMUSER" } else { $env:KIDUSER }
+          Write-Host "-EnforceUsers $enforce"
+          .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $enforce.Split(",")
+
+      - name: Wait until the sheet is loaded (fail-closed until then)
+        shell: pwsh
+        run: |
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          $ok = $false
+          for ($i = 0; $i -lt 45; $i++) {
+            if ((Test-Path $log) -and ((Get-Content $log -Raw) -match "lists loaded")) { $ok = $true; break }
+            Start-Sleep 2
+          }
+          if (-not $ok) { Write-Host "::warning::sheet not loaded after 90 s - probing anyway" } else { Write-Host "sheet loaded after $($i*2) s" }
+
+      - name: Probe as each account
+        id: probe
+        shell: pwsh
+        run: |
+          $lines = @(
+            '@echo off',
+            "curl.exe -s -o NUL -w ""LISTED=%%{http_code} "" --max-time 25 -x http://127.0.0.1:8080 -k $env:LISTED",
+            "curl.exe -s -o NUL -w ""UNLISTED=%%{http_code}"" --max-time 25 -x http://127.0.0.1:8080 -k $env:UNLISTED"
+          )
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
+          icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
+          icacls C:\probe.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $out = "C:\Users\Public\$u.txt"
+            Remove-Item $out -Force -EA SilentlyContinue
+            Set-Content "C:\run-$u.cmd" @("@echo off", "call C:\probe.cmd > $out 2>&1") -Encoding ASCII
+            icacls "C:\run-$u.cmd" /grant "Everyone:(RX)" *>$null
+            $c = New-Object PSCredential($u, $sec)
+            try { Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-$u.cmd" -LoadUserProfile -Wait -EA Stop }
+            catch { Write-Host "could not run as ${u}: $($_.Exception.Message)" }
+          }
+          Start-Sleep -Seconds 3
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $f = "C:\Users\Public\$u.txt"
+            $t = if (Test-Path $f) { (Get-Content $f -Raw).Trim() } else { "NO OUTPUT" }
+            Write-Host "$u -> $t"
+            "$u=$t" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
+      - name: Judge the scenario
+        shell: pwsh
+        run: |
+          function Code($who, $which) {
+            $f = "C:\Users\Public\$who.txt"
+            if (-not (Test-Path $f)) { return "none" }
+            $t = Get-Content $f -Raw
+            if ($t -match "$which=(\d+)") { return $Matches[1] }
+            return "none"
+          }
+          $kidUn = Code $env:KIDUSER "UNLISTED"
+          $kidLi = Code $env:KIDUSER "LISTED"
+          $admUn = Code $env:ADMUSER "UNLISTED"
+          $admLi = Code $env:ADMUSER "LISTED"
+          $mode = "${{ matrix.mode }}"
+          Write-Host "kid   listed=$kidLi unlisted=$kidUn"
+          Write-Host "admin listed=$admLi unlisted=$admUn"
+
+          $fail = @()
+          # the filtered accounts must reach a listed site and be refused an unlisted one
+          if ($kidUn -ne "403") { $fail += "kid was NOT blocked on an unlisted site (got $kidUn)" }
+          if ($kidLi -eq "403") { $fail += "kid was blocked on a LISTED site (got $kidLi)" }
+          if ($mode -eq "all-users") {
+            if ($admUn -ne "403") { $fail += "admin was NOT blocked though enforced (got $admUn)" }
+            if ($admLi -eq "403") { $fail += "admin was blocked on a LISTED site (got $admLi)" }
+          } else {
+            if ($admUn -eq "403") { $fail += "admin WAS blocked though not enforced (got $admUn)" }
+          }
+
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          if (-not (Test-Path $log)) { $fail += "no log written" }
+          else {
+            $l = Get-Content $log -Raw
+            if ($l -notmatch "lists loaded")   { $fail += "the sheet never loaded" }
+            if ($l -match "\(None\)")          { $fail += "user lookup returned None" }
+            if ($l -match "config: greengate")  { $fail += "the addon could not read its own config" }
+            if ($l -match "sheet=NONE SET")    { $fail += "sheetId did not survive into the config" }
+          }
+
+          $status = if ($fail) { "FAIL" } else { "PASS" }
+          $row = "| ${{ matrix.os }} | $mode | kid $kidLi/$kidUn | admin $admLi/$admUn | $status |"
+          $row | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          if ($fail) { $fail | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS"
+
+      - name: Log
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "--- C:\ProgramData\GreenGate ---"
+          Get-ChildItem C:\ProgramData\GreenGate -Recurse -EA SilentlyContinue |
+            Select-Object FullName, Length, LastWriteTime | Format-Table -AutoSize
+          foreach ($f in "supervisor.log", "mitmdump-err.log", "mitmdump-out.log", "watchdog.log") {
+            $p2 = "C:\ProgramData\GreenGate\$f"
+            Write-Host "--- $f ---"
+            if (Test-Path $p2) { Get-Content $p2 -Tail 40 } else { Write-Host "(missing)" }
+          }
+          Write-Host "--- greengate.log ---"
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          if (Test-Path $log) { Get-Content $log -Tail 40 } else { Write-Host "*** NO LOG ***" }
+          Write-Host "--- processes ---"
+          Get-Process mitmdump -EA SilentlyContinue |
+            Select-Object Id, @{n="MB";e={[int]($_.WorkingSet64/1MB)}}, StartTime, Path |
+            Format-Table -AutoSize
+
+      - name: Uninstall and verify clean
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\reset-clean.ps1
+          $left = @()
+          foreach ($t in "GreenGate","GreenGate Watchdog","GreenGate Resume") {
+            if (Get-ScheduledTask -TaskName $t -EA SilentlyContinue) { $left += "task $t" }
+          }
+          if (Test-Path 'C:\Program Files\GreenGate') { $left += "program dir" }
+          if (Test-Path 'C:\ProgramData\GreenGate')   { $left += "data dir" }
+          if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GreenGate') { $left += "uninstall entry" }
+          if (Test-Path 'HKLM:\SOFTWARE\Policies\Microsoft\Edge') { $left += "HKLM Edge policy" }
+          if (Test-Path "$env:SystemRoot\System32\greengate.cmd") { $left += "greengate.cmd" }
+          $left += @(Get-ChildItem "C:\Users\*\Desktop\GreenGate*.lnk" -EA SilentlyContinue | ForEach-Object { "shortcut $($_.Name)" })
+          $left += @(Get-ChildItem "C:\Users\*\AppData\Local\Temp\GreenGate" -Directory -EA SilentlyContinue | ForEach-Object { "temp data $($_.FullName)" })
+          # every enforced account's own hive must be free of the proxy again
+          foreach ($u in $env:KIDUSER, $env:ADMUSER) {
+            $sid = (New-Object Security.Principal.NTAccount($u)).Translate([Security.Principal.SecurityIdentifier]).Value
+            New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+            $ld = $false
+            if (-not (Test-Path "HKU:\$sid")) { & reg.exe load "HKU\$sid" "C:\Users\$u\NTUSER.DAT" *>$null; $ld = $true }
+            $pm = (Get-ItemProperty "HKU:\$sid\Software\Policies\Microsoft\Edge" -EA SilentlyContinue).ProxyMode
+            $pe = (Get-ItemProperty "HKU:\$sid\Software\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue).ProxyEnable
+            if ($pm) { $left += "$u still has Edge ProxyMode=$pm" }
+            if ($pe -eq 1) { $left += "$u still has ProxyEnable=1" }
+            if ($ld) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *>$null }
+          }
+          if ($left) { Write-Host "LEFT BEHIND: $($left -join '; ')"; exit 1 }
+          Write-Host "machine clean"
+
+  failed-install:
+    name: install fails halfway, then reset
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Do the account names come out right?
+        shell: pwsh
+        run: |
+          # The setup window must show the person's real name, not the account id
+          # Windows derives from a Microsoft account ("nguye").
+          Set-LocalUser -Name $env:KIDUSER -FullName "Nguyễn Duy Phước An"
+          $env:PYTHONIOENCODING = "utf-8"
+          python -c "import sys; sys.path.insert(0,'setup'); import greengate_setup as k; [print(r) for r in k.local_accounts()]"
+
+      - name: Hold port 8080 so the proxy cannot start
+        shell: pwsh
+        run: |
+          # Exactly yesterday's shape: everything installs, the proxy never comes up.
+          Start-Job -Name hog -ScriptBlock {
+            $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 8080)
+            $l.Start(); Start-Sleep -Seconds 600
+          } | Out-Null
+          Start-Sleep -Seconds 5
+          Write-Host "8080 held: $((Test-NetConnection 127.0.0.1 -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue))"
+
+      - name: Install - must abort, not brick the machine
+        shell: powershell
+        run: |
+          $ok = $true
+          try { .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER } catch { $ok = $false }
+          Write-Host "--- the machine must still be usable ---"
+          $pe = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue).ProxyEnable
+          $edge = (Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -EA SilentlyContinue).ProxyMode
+          Write-Host "HKLM ProxyEnable = $pe   (must not be 1)"
+          Write-Host "HKLM Edge ProxyMode = $edge   (must be empty)"
+          $code = (& curl.exe -s -o NUL -w "%{http_code}" --max-time 25 https://www.google.com/)
+          Write-Host "direct internet still works: $code"
+          $bad = @()
+          if ($pe -eq 1)  { $bad += "the machine was left pointing at a dead proxy" }
+          if ($edge)      { $bad += "Edge was left pointing at a dead proxy" }
+          if ($code -notmatch '^[23]') { $bad += "no internet after the failed install (got $code)" }
+          if ($bad) { $bad | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS - aborted without taking the machine offline"
+
+      - name: Now reset, and prove nothing survives
+        shell: pwsh
+        run: |
+          Stop-Job -Name hog -EA SilentlyContinue; Remove-Job -Name hog -Force -EA SilentlyContinue
+          .\payload\reset-clean.ps1
+          $left = @()
+          foreach ($t in "GreenGate","GreenGate Watchdog","GreenGate Resume") {
+            if (Get-ScheduledTask -TaskName $t -EA SilentlyContinue) { $left += "task $t" }
+          }
+          foreach ($p in 'C:\Program Files\GreenGate', 'C:\ProgramData\GreenGate',
+                         "$env:SystemRoot\System32\greengate.cmd",
+                         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GreenGate',
+                         'HKLM:\SOFTWARE\Policies\Microsoft\Edge') {
+            if (Test-Path $p) { $left += $p }
+          }
+          $left += @(Get-ChildItem "C:\Users\*\Desktop\GreenGate*.lnk" -EA SilentlyContinue | ForEach-Object { $_.FullName })
+          if ($left) { Write-Host "LEFT BEHIND: $($left -join '; ')"; exit 1 }
+          Write-Host "machine clean after a failed install"
+
+  budgets:
+    name: time budgets, two children
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload and two child accounts
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in "kid1", "kid2") {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+            $c = New-Object PSCredential($u, $sec)
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+          }
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers kid1,kid2
+
+      - name: Point it at a one-minute global budget, and spend kid1's
+        shell: pwsh
+        run: |
+          # "*" is the whole-internet budget. One minute makes the test quick.
+          Set-Content C:\sites.csv @("Trang web,Ghi chu,Gioi han", "*,Tong moi ngay,1", "example.com,,") -Encoding UTF8
+          Set-Content C:\chans.csv @("Kenh") -Encoding UTF8
+          $cfgPath = "C:\Program Files\GreenGate\greengate.json"
+          $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+          $cfg | Add-Member -NotePropertyName sitesUrl    -NotePropertyValue "file:///C:/sites.csv" -Force
+          $cfg | Add-Member -NotePropertyName channelsUrl -NotePropertyValue "file:///C:/chans.csv" -Force
+          [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 5),
+                                         (New-Object System.Text.UTF8Encoding($false)))
+          # kid1 has already used its single minute - in some OTHER minute of the day
+          $day = Get-Date -Format "yyyy-MM-dd"
+          $spent = ((Get-Date).Hour * 60 + (Get-Date).Minute + 500) % 1440
+          $usage = '{"v":2,"days":{"' + $day + '":{"kid1":{"*":[' + $spent + ']}}}}'
+          [System.IO.File]::WriteAllText("C:\ProgramData\GreenGate\usage-state.json", $usage,
+                                         (New-Object System.Text.UTF8Encoding($false)))
+          # Stop-ScheduledTask alone leaves mitmdump running, so the old config stays live
+          Stop-ScheduledTask -TaskName GreenGate
+          Stop-Process -Name mitmdump -Force -EA SilentlyContinue
+          Start-Sleep 3
+          Remove-Item "C:\ProgramData\GreenGate\greengate.log" -Force -EA SilentlyContinue
+          Start-ScheduledTask -TaskName GreenGate; Start-Sleep 15
+          $log = Get-Content "C:\ProgramData\GreenGate\greengate.log" -Raw
+          Write-Host $log
+          # prove the local sheet is the one in force before judging anything else
+          if ($log -notmatch "lists loaded: (\d+) domains") { throw "no list loaded at all" }
+          $n = [int]$Matches[1]
+          Write-Host "domains loaded: $n"
+          if ($n -gt 20) { throw "still reading the production sheet ($n domains) - the config override did not take" }
+
+      - name: kid1 is out of time, kid2 is not
+        shell: pwsh
+        run: |
+          # Sec-Fetch-Dest matters: only browser traffic is metered, by design, so a bare
+          # curl is never counted against a budget and would never be blocked by one.
+          $lines = @('@echo off',
+            'curl.exe -s -o NUL -w "%%{http_code}" --max-time 25 -H "Sec-Fetch-Dest: document" -x http://127.0.0.1:8080 -k https://example.com/')
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
+          icacls C:\probe.cmd /grant "Everyone:(RX)" *>$null
+          icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          foreach ($u in "kid1", "kid2") {
+            Set-Content "C:\run-$u.cmd" @("@echo off", "call C:\probe.cmd > C:\Users\Public\$u.txt 2>&1") -Encoding ASCII
+            icacls "C:\run-$u.cmd" /grant "Everyone:(RX)" *>$null
+            $c = New-Object PSCredential($u, $sec)
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-$u.cmd" -LoadUserProfile -Wait
+          }
+          Start-Sleep 3
+          $k1 = (Get-Content C:\Users\Public\kid1.txt -Raw).Trim()
+          $k2 = (Get-Content C:\Users\Public\kid2.txt -Raw).Trim()
+          Write-Host "kid1 (budget spent)     -> $k1   expected 403"
+          Write-Host "kid2 (budget untouched) -> $k2   expected 200"
+          Get-Content "C:\ProgramData\GreenGate\greengate.log" -Tail 8
+          $fail = @()
+          if ($k1 -ne "403") { $fail += "kid1 was not blocked by the global budget (got $k1)" }
+          if ($k2 -eq "403") { $fail += "kid2 was blocked by kid1's spending (got $k2)" }
+          if ($fail) { $fail | ForEach-Object { Write-Host "FAIL: $_" }; exit 1 }
+          Write-Host "PASS - budgets are per account"
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1
+
+  watchdog:
+    name: watchdog recovers a dead proxy
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+
+      - name: Kill the proxy - the supervisor must bring it back by itself
+        shell: pwsh
+        run: |
+          function Probe {
+            $c = & curl.exe -s -o NUL -w "%{http_code}" --max-time 8 `
+                   -x "http://127.0.0.1:8080" "http://greengate.local/" 2>$null
+            if ($c -match '^\d{3}$' -and $c -ne "000") { return $c } else { return "down" }
+          }
+          if ((Probe) -eq "down") { throw "proxy was not healthy before the test began" }
+          Write-Host "before : $(Probe)"
+
+          # Nobody calls the watchdog here. The supervisor owns mitmdump and re-checks
+          # every 30s, so recovery has to happen with no outside help at all. The kill is
+          # verified by pid, not by probing: when the kill lands just before a poll the
+          # supervisor can have a new proxy answering within a second or two.
+          $victims = @(Get-Process mitmdump | Select-Object -ExpandProperty Id)
+          Stop-Process -Name mitmdump -Force
+          Start-Sleep -Seconds 3
+          $left = @($victims | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+          if ($left.Count) { throw "killed mitmdump pid(s) still alive: $left" }
+          Write-Host "killed : pids $victims gone, probe now $(Probe)"
+
+          $back = "down"
+          for ($i = 0; $i -lt 40; $i++) {
+            Start-Sleep -Seconds 3
+            $back = Probe
+            if ($back -ne "down") { break }
+          }
+          Write-Host "after  : $back  (waited $(($i + 1) * 3)s, unattended)"
+          Write-Host "--- supervisor.log ---"
+          Get-Content "C:\ProgramData\GreenGate\supervisor.log" -EA SilentlyContinue
+          if ($back -eq "down") { throw "FAIL: supervisor did not restore the proxy" }
+          $m = @{}; Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue |
+            ForEach-Object { $m[[int]$_.ProcessId] = [int]$_.ParentProcessId }
+          $n = @($m.Keys | Where-Object { -not $m.ContainsKey($m[$_]) }).Count   # trees, not processes
+          Write-Host "mitmdump proxies: $n (one proxy = bootstrap + server)"
+          if ($n -ne 1) { throw "FAIL: expected exactly 1 mitmdump, found $n" }
+          Write-Host "PASS - recovered unattended, single instance"
+
+      - name: Stopping the task must not orphan the proxy
+        shell: pwsh
+        run: |
+          Stop-ScheduledTask -TaskName "GreenGate"
+          Start-Sleep -Seconds 8
+          $m = @{}; Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -EA SilentlyContinue |
+            ForEach-Object { $m[[int]$_.ProcessId] = [int]$_.ParentProcessId }
+          $n = @($m.Keys | Where-Object { -not $m.ContainsKey($m[$_]) }).Count   # trees, not processes
+          Write-Host "mitmdump after stopping the task: $n"
+          if ($n -ne 0) { throw "FAIL: $n orphaned mitmdump left behind" }
+          Start-ScheduledTask -TaskName "GreenGate"
+          Write-Host "PASS - the proxy goes down with its supervisor"
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1
+
+  selftest:
+    name: greengate test, and the log storm stays contained
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload and a child account
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+
+      - name: A blocked endpoint hammering in a loop must not flood the log
+        shell: pwsh
+        run: |
+          # This is what Windows telemetry did on the real machine: 4,786 refusals in
+          # six minutes, each one writing two files on the event loop.
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          $before = @(Get-Content $log -EA SilentlyContinue).Count
+          $lines = @('@echo off', 'for /L %%i in (1,1,400) do @curl.exe -s -o NUL --max-time 5 -H "Sec-Fetch-Dest: document" -x http://127.0.0.1:8080 -k https://example.com/')
+          Set-Content C:\storm.cmd $lines -Encoding ASCII
+          icacls C:\storm.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\storm.cmd" -LoadUserProfile -Wait
+          $sw.Stop()
+          Start-Sleep -Seconds 5
+          $after = @(Get-Content $log -EA SilentlyContinue).Count
+          $grew = $after - $before
+          Write-Host "400 blocked requests in $([int]$sw.Elapsed.TotalSeconds)s added $grew log lines"
+          if ($grew -gt 60) { throw "FAIL: log grew by $grew lines - repeats are not being collapsed" }
+          $alive = & curl.exe -s -o NUL -w "%{http_code}" --max-time 15 -x http://127.0.0.1:8080 "http://greengate.local/" 2>$null
+          Write-Host "proxy still answering after the storm: $alive"
+          if ($alive -eq "000") { throw "FAIL: proxy stopped answering under a block storm" }
+          Write-Host "PASS - storm contained, proxy responsive"
+
+      - name: Run greengate test as the child
+        shell: pwsh
+        run: |
+          & "C:\Program Files\GreenGate\greengate-test.ps1" -Minutes 2 -Port 8080 `
+              -AsUser $env:KIDUSER -Password $env:TESTPASS
+          $rep = Get-ChildItem "$env:USERPROFILE\Desktop\greengate-test-*.txt" -EA SilentlyContinue |
+                 Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $rep) { throw "FAIL: greengate test wrote no report" }
+          Write-Host "--- report ---"
+          Get-Content $rep.FullName
+          $txt = Get-Content $rep.FullName -Raw
+          foreach ($need in "machine", "tasks", "processes and port", "permissions",
+                            "health over time", "VERDICT") {
+            if ($txt -notmatch [regex]::Escape($need)) { throw "FAIL: report missing section '$need'" }
+          }
+          # "NOT HEALTHY" contains "HEALTHY" - checking for the bare word passed either way
+          if ($txt -match "VERDICT: PROBLEMS FOUND") {
+            Write-Host "self-test reported problems:"
+            ($txt -split "`n" | Select-String -Pattern "^\s+- " ) | ForEach-Object { Write-Host $_ }
+            throw "FAIL: self-test found problems"
+          }
+          if ($txt -notmatch "VERDICT: HEALTHY") { throw "FAIL: self-test reached no verdict" }
+          Write-Host "PASS - self-test ran and reported healthy"
+
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1
+
+  latency:
+    name: latency, direct vs GreenGate (Windows)
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage payload and a child account
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","echo ." -LoadUserProfile -Wait -NoNewWindow
+
+      - name: Baseline as the child, BEFORE installing (direct)
+        shell: pwsh
+        run: |
+          # 8 timed fetches per page, browser-like headers, as the child account. time_total in ms.
+          # all of them are in the test sheet's websites tab (an unlisted page would only time the block page)
+          $pages = @("https://www.google.com/", "https://www.nasa.gov/", "https://www.ted.com/",
+                     "https://www.w3schools.com/", "https://www.youtube.com/", "https://www.youtube.com/watch?v=LmszJQzuAcc")
+          $lines = @('@echo off')
+          foreach ($p in $pages) { for ($i = 0; $i -lt 8; $i++) {
+            $lines += "curl.exe -s -o NUL -w ""$p %%{time_total} %%{http_code}\n"" --max-time 40 -k -H ""Sec-Fetch-Dest: document"" -A ""Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0"" $p"
+          } }
+          Set-Content C:\lat-direct.cmd $lines -Encoding ASCII
+          icacls C:\lat-direct.cmd /grant "Everyone:(RX)" *>$null
+          icacls C:\Users\Public /grant "Everyone:(OI)(CI)M" *>$null
+          Set-Content C:\run-direct.cmd @("@echo off", "call C:\lat-direct.cmd > C:\Users\Public\lat-direct.txt 2>&1") -Encoding ASCII
+          icacls C:\run-direct.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-direct.cmd" -LoadUserProfile -Wait
+          Get-Content C:\Users\Public\lat-direct.txt | Select-Object -First 3
+
+      - name: Install
+        shell: powershell
+        run: .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+
+      - name: Same fetches as the child, THROUGH GreenGate
+        shell: pwsh
+        run: |
+          # The child's WinINET proxy is set by policy; curl needs -x explicitly. The CA is in the machine store.
+          (Get-Content C:\lat-direct.cmd) -replace 'curl.exe -s', 'curl.exe -s -x http://127.0.0.1:8080' |
+            Set-Content C:\lat-proxy.cmd -Encoding ASCII
+          icacls C:\lat-proxy.cmd /grant "Everyone:(RX)" *>$null
+          Set-Content C:\run-proxy.cmd @("@echo off", "call C:\lat-proxy.cmd > C:\Users\Public\lat-proxy.txt 2>&1") -Encoding ASCII
+          icacls C:\run-proxy.cmd /grant "Everyone:(RX)" *>$null
+          $sec = ConvertTo-SecureString $env:TESTPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\run-proxy.cmd" -LoadUserProfile -Wait
+          Get-Content C:\Users\Public\lat-proxy.txt | Select-Object -First 3
+
+      - name: Compare
+        shell: pwsh
+        run: |
+          function Med($a) { $s = @($a | Sort-Object); if (-not $s.Count) { return 0 }; return $s[[math]::Floor($s.Count / 2)] }
+          # only 2xx/3xx answers count: a 403 is the block page and a 000 a failed connection
+          $codes = @{}
+          function Load($f) { $h = @{}; foreach ($l in Get-Content $f) { $p = $l -split ' '; if ($p.Count -ge 2 -and $p[1] -match '^[\d.,]+$') {
+            $c = if ($p.Count -ge 3) { $p[2] } else { '200' }; $codes[$p[0]] = $c
+            if ($c -match '^[23]') { $h[$p[0]] = @($h[$p[0]]) + [double]($p[1] -replace ',', '.') } } }; return $h }
+          $d = Load C:\Users\Public\lat-direct.txt; $x = Load C:\Users\Public\lat-proxy.txt
+          $out = @("| Trang | Truc tiep (ms) | Qua GreenGate (ms) | Chenh lech | Ma (GreenGate) |", "|---|---|---|---|---|")
+          foreach ($k in $d.Keys | Sort-Object) {
+            $md = [int](1000 * (Med $d[$k]))
+            if ($x.ContainsKey($k)) { $mx = [int](1000 * (Med $x[$k])); $diff = "$(if ($mx -ge $md) {'+'} else {''})$($mx - $md) ms" } else { $mx = "-"; $diff = "-" }
+            $out += "| $k | $md | $mx | $diff | $($codes[$k]) |"
+          }
+          $out | ForEach-Object { Write-Host $_ }
+          $out | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $out | Set-Content C:\Users\Public\latency-windows.md -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: latency-windows
+          path: C:\Users\Public\latency-windows.md
+      - name: Clean up
+        if: always()
+        shell: pwsh
+        run: .\payload\reset-clean.ps1

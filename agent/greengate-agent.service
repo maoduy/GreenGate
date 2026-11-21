@@ -1,0 +1,20 @@
+# systemd USER unit: runs in the child's own session (needed for screenshots).
+# Install for the child account:
+#   mkdir -p ~/.config/systemd/user && cp greengate-agent.service ~/.config/systemd/user/
+#   systemctl --user enable --now greengate-agent
+# The installer in linux/ does this for every enforced account.
+[Unit]
+Description=GreenGate agent (screenshots, history, remote refresh)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/opt/greengate/venv/bin/python /opt/greengate/agent/greengate_agent.py run
+Restart=always
+RestartSec=10
+Environment=NO_PROXY=*
+# X11 only in v1 (mss). On Wayland the session must run XWayland with DISPLAY set.
+PassEnvironment=DISPLAY XAUTHORITY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS
+
+[Install]
+WantedBy=default.target

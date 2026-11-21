@@ -1,0 +1,128 @@
+{
+  "comment": "Category -> public sources. Compiled daily by .github/workflows/build-lists.yml into <category>.txt.gz + <category>.bin on the GitHub release tagged 'lists'. Formats: 'domains' (one per line, # comments), 'hosts' (0.0.0.0 host), 'ut1' (tar.gz with <cat>/domains).",
+  "licenses": {
+    "blocklistproject": "The Unlicense - https://github.com/blocklistproject/Lists",
+    "hagezi": "GPL-3.0 - https://github.com/hagezi/dns-blocklists",
+    "ut1": "CC BY-SA 4.0 - Université Toulouse 1 Capitole, https://dsi.ut-capitole.fr/blacklists/"
+  },
+  "categories": {
+    "adult": {
+      "vi": "Nội dung người lớn (18+)",
+      "default": true,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/porn-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt", "format": "domains", "by": "hagezi"}
+      ]
+    },
+    "adult-extended": {
+      "vi": "Người lớn, danh sách mở rộng (~4 triệu tên miền, nặng)",
+      "default": false,
+      "sources": [
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/adult.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "gambling": {
+      "vi": "Cờ bạc, cá độ",
+      "default": true,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/gambling-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling.medium-onlydomains.txt", "format": "domains", "by": "hagezi"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/gambling.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/arjel.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "drugs": {
+      "vi": "Ma tuý, chất kích thích, thuốc lá điện tử",
+      "default": true,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/drugs-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/vaping-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/drogue.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "weapons": {
+      "vi": "Vũ khí, chất nổ, vật liệu nguy hiểm",
+      "default": true,
+      "sources": [
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/dangerous_material.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "violence": {
+      "vi": "Bạo lực, thù ghét",
+      "default": true,
+      "sources": [
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/agressif.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "dating": {
+      "vi": "Hẹn hò",
+      "default": false,
+      "sources": [
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/dating.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "social": {
+      "vi": "Mạng xã hội (Facebook, TikTok, X...)",
+      "default": false,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/facebook-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/tiktok-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/twitter-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/social_networks.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "games": {
+      "vi": "Trò chơi trực tuyến",
+      "default": false,
+      "sources": [
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/games.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "piracy": {
+      "vi": "Phim lậu, crack, torrent",
+      "default": false,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/piracy-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/torrent-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/warez.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "malware": {
+      "vi": "Lừa đảo, giả mạo, mã độc (danh sách gọn)",
+      "default": true,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/phishing-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/scam-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/ransomware-nl.txt", "format": "domains", "by": "blocklistproject"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/malware.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/phishing.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "malware-extended": {
+      "vi": "Mã độc, danh sách đầy đủ (~2 triệu tên miền, nặng)",
+      "default": false,
+      "sources": [
+        {"url": "https://blocklistproject.github.io/Lists/alt-version/malware-nl.txt", "format": "domains", "by": "blocklistproject"}
+      ]
+    },
+    "bypass": {
+      "vi": "VPN, proxy, DNS riêng - các cách lách bộ lọc",
+      "default": true,
+      "sources": [
+        {"url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt", "format": "domains", "by": "hagezi"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/vpn.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/doh.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/redirector.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/strong_redirector.tar.gz", "format": "ut1", "by": "ut1"},
+        {"url": "http://dsi.ut-capitole.fr/blacklists/download/residential-proxies.tar.gz", "format": "ut1", "by": "ut1"}
+      ]
+    },
+    "ads": {
+      "vi": "Quảng cáo và theo dõi",
+      "default": false,
+      "sources": [
+        {"url": "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/pro-onlydomains.txt", "format": "domains", "by": "hagezi"}
+      ]
+    }
+  }
+}

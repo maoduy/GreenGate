@@ -1,0 +1,307 @@
+<#
+GreenGate supervisor - the ONLY thing allowed to start or stop mitmdump.
+
+Before this, three different things could launch the proxy: Task Scheduler (through
+an AtStartup and an AtLogOn trigger on the same task), the installer's explicit
+Start-ScheduledTask, and the watchdog's recovery. Nothing owned the process, so
+nothing could say whether what was running was healthy.
+
+The 6MB process sitting beside the 155MB one was never the symptom of that. mitmdump
+is a PyInstaller onefile binary and always runs as a bootstrap plus the server it
+unpacks and re-executes. Every attempt to reap "the duplicate" was killing a working
+proxy. Counting processes is meaningless here; the only honest health check is
+whether the thing answers.
+
+Task Scheduler now runs THIS, and this runs mitmdump as its own child:
+
+  * already serving        -> leave it alone, just sweep away any stray instance
+  * not serving            -> clear whatever is there and start one
+  * started                -> wait until it really answers before calling it up
+  * will not come up       -> back off, try again, and after enough failures pause
+                              GreenGate so the machine is usable rather than leaving
+                              the household offline
+
+Only one supervisor can exist: Task Scheduler's IgnoreNew plus a global mutex. And
+because the proxy is its child, stopping the task takes the proxy down with it
+instead of orphaning it.
+#>
+param(
+  [int]$Port = 8080,
+  [int]$PollSeconds = 30,        # how often to re-check a healthy proxy
+  [int]$MaxStartSeconds = 90,    # how long a fresh start may take to answer
+  [int]$FailOpenAfter = 5        # consecutive failed starts before standing down
+)
+
+$Dir  = "C:\Program Files\GreenGate"
+$Data = "C:\ProgramData\GreenGate"
+$log  = "$Data\supervisor.log"
+
+function Note($m) {
+  try {
+    if ((Test-Path $log) -and (Get-Item $log).Length -gt 1MB) {
+      Move-Item $log "$log.1" -Force -ErrorAction SilentlyContinue
+    }
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $m" | Add-Content $log -ErrorAction SilentlyContinue
+  } catch { }
+}
+
+function PortOwner {
+  (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+   Select-Object -First 1).OwningProcess
+}
+
+function Serving {
+  # Only answers if the addon's own request hook ran. A TCP connect proves nothing -
+  # the kernel accepts into the backlog even when the process behind it is wedged.
+  $c = & curl.exe -s -o NUL -w "%{http_code}" --max-time 8 `
+         -x "http://127.0.0.1:$Port" "http://greengate.local/" 2>$null
+  return ($c -match '^\d{3}$' -and $c -ne "000")
+}
+
+# mitmdump.exe is a PyInstaller onefile build: it unpacks itself and re-executes, so a
+# single healthy proxy is ALWAYS two processes - a small bootstrap (~6MB) and the real
+# server (~155MB) that holds the port. Start-Process hands back the bootstrap. Treating
+# "two processes" as a duplicate is what made the supervisor kill the server it had just
+# started, every five seconds. One proxy = one process TREE.
+function ProcMap {
+  $m = @{}
+  foreach ($p in Get-CimInstance Win32_Process -Filter "Name='mitmdump.exe'" -ErrorAction SilentlyContinue) {
+    $m[[int]$p.ProcessId] = [int]$p.ParentProcessId
+  }
+  return $m
+}
+
+function TreeOf($root, $map) {
+  # the root, everything descended from it, and the ancestors that are also mitmdump
+  $keep = @{}
+  if (-not $root) { return $keep }
+  $keep[[int]$root] = $true
+  $up = [int]$root
+  while ($map.ContainsKey($up) -and $map.ContainsKey($map[$up])) { $up = $map[$up]; $keep[$up] = $true }
+  for ($i = 0; $i -lt 8; $i++) {           # walk down, a few generations is plenty
+    foreach ($pid2 in @($map.Keys)) {
+      if (-not $keep.ContainsKey($pid2) -and $keep.ContainsKey($map[$pid2])) { $keep[$pid2] = $true }
+    }
+  }
+  return $keep
+}
+
+function SweepStrays($keep) {
+  $map  = ProcMap
+  $mine = TreeOf $keep $map
+  $extra = @($map.Keys | Where-Object { -not $mine.ContainsKey($_) })
+  if ($extra.Count) {
+    Note "sweeping $($extra.Count) stray mitmdump process(es) outside the tree of pid $keep"
+    $extra | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+  }
+}
+
+function KillTree($root) {
+  $map = ProcMap
+  foreach ($p in @((TreeOf $root $map).Keys)) { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue }
+}
+
+# A process joins the job only if its parent was already in the job when it was created.
+# The bootstrap is added right after Start-Process returns, but on a fast machine it can
+# have unpacked and spawned the server in that gap (CI saw the server survive a task stop
+# for exactly this reason). So, until the proxy answers, keep adopting every descendant.
+function AdoptTree($root) {
+  if ($Job -eq [IntPtr]::Zero -or -not $root) { return }
+  $map = ProcMap
+  foreach ($p in @((TreeOf $root $map).Keys)) {
+    if ($p -eq [int]$root) { continue }
+    try { [void][KidJob]::Add($Job, (Get-Process -Id $p -ErrorAction Stop).Handle) } catch { }
+  }
+}
+
+# ---------------------------------------------------------------- kill-on-close job
+# Tearing the proxy down in a finally block only works when we are asked politely.
+# Task Scheduler stopping the task terminates this process outright, finally never
+# runs, and mitmdump is orphaned - an unowned proxy that the next start then has to
+# fight. A job object with KILL_ON_JOB_CLOSE moves that guarantee into the kernel:
+# whenever this process dies, for any reason, Windows kills everything in the job
+# with it. No cooperation required.
+$JobCode = @'
+using System;
+using System.Runtime.InteropServices;
+public static class KidJob {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateJobObjectW(IntPtr a, string name);
+  [DllImport("kernel32.dll")]
+  static extern bool SetInformationJobObject(IntPtr job, int cls, IntPtr info, uint len);
+  [DllImport("kernel32.dll")]
+  static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct BASIC {
+    public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+    public uint LimitFlags;
+    public UIntPtr MinWorkingSet, MaxWorkingSet;
+    public uint ActiveProcessLimit;
+    public UIntPtr Affinity;
+    public uint PriorityClass, SchedulingClass;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct EXTENDED {
+    public BASIC Basic;
+    public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes;
+    public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemory, PeakJobMemory;
+  }
+
+  public static IntPtr Create() {
+    IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
+    if (job == IntPtr.Zero) return IntPtr.Zero;
+    EXTENDED e = new EXTENDED();
+    e.Basic.LimitFlags = 0x2000;              // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    int len = Marshal.SizeOf(typeof(EXTENDED));
+    IntPtr p = Marshal.AllocHGlobal(len);
+    try {
+      Marshal.StructureToPtr(e, p, false);
+      if (!SetInformationJobObject(job, 9, p, (uint)len)) return IntPtr.Zero;
+    } finally { Marshal.FreeHGlobal(p); }
+    return job;
+  }
+  public static bool Add(IntPtr job, IntPtr proc) {
+    return job != IntPtr.Zero && AssignProcessToJobObject(job, proc);
+  }
+}
+'@
+$Job = [IntPtr]::Zero
+try {
+  Add-Type -TypeDefinition $JobCode -Language CSharp -ErrorAction Stop
+  $Job = [KidJob]::Create()
+} catch { }
+
+$mutex = New-Object System.Threading.Mutex($false, "Global\GreenGateSupervisor")
+$held = $false
+try { $held = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $held = $true }
+if (-not $held) { Note "another supervisor already has the lock - exiting"; exit 0 }
+
+# Safety net for accounts that had no profile at install time (see greengate-policy.ps1):
+# every poll, give any logged-on protected account that lacks the proxy policy its policy.
+$policyScript = "$Dir\greengate-policy.ps1"
+if (Test-Path $policyScript) { try { . $policyScript } catch { Note "policy script failed to load: $($_.Exception.Message)" } }
+function EnsurePolicies {
+  if (-not (Get-Command Confirm-GreenGateUserPolicies -ErrorAction SilentlyContinue)) { return }
+  try {
+    $cfg = Get-Content "$Dir\greengate.json" -Raw -ErrorAction Stop | ConvertFrom-Json
+    $users = @($cfg.enforceUsers)
+    if (-not $users) { return }
+    foreach ($u in (Confirm-GreenGateUserPolicies $users "127.0.0.1:$Port")) { Note "applied the proxy policy to '$u' (logged on without it)" }
+  } catch { Note "policy check failed: $($_.Exception.Message)" }
+}
+
+$exe = "$Dir\mitmdump.exe"
+# ONE pre-quoted string, not an array. Start-Process joins an array with spaces and
+# quotes nothing, so "C:\Program Files\GreenGate\greengate.py" arrived as two separate
+# arguments and mitmdump could never start.
+$arg = "--listen-host 127.0.0.1 --listen-port $Port " +
+       "--set confdir=`"$Data\ca`" -s `"$Dir\greengate.py`" -q"
+$child = $null
+$fails = 0
+Note "supervisor up (port $Port, poll ${PollSeconds}s)$(if ($Job -eq [IntPtr]::Zero) { ', no job object' } else { '' })"
+
+try {
+  while ($true) {
+
+    # -------------------------------------------------- healthy: do nothing but tidy
+    if (Serving) {
+      if ($fails) { Note "serving again after $fails failed start(s)" }
+      $fails = 0
+      SweepStrays (PortOwner)
+      EnsurePolicies
+      Start-Sleep -Seconds $PollSeconds
+      continue
+    }
+
+    # -------------------------------------------------- not serving: clear and start
+    $alive = @(Get-Process mitmdump -ErrorAction SilentlyContinue)
+    if ($alive.Count) {
+      Note "not answering but $($alive.Count) process(es) alive - clearing them"
+      $alive | Stop-Process -Force -ErrorAction SilentlyContinue
+      Start-Sleep -Seconds 2
+    }
+
+    if (-not (Test-Path $exe)) {
+      $fails++
+      Note "mitmdump.exe is missing at $exe (attempt $fails) - antivirus may have removed it"
+      Start-Sleep -Seconds 60
+      if ($fails -ge $FailOpenAfter) { break }
+      continue
+    }
+
+    Note "starting mitmdump"
+    try {
+      $so = "$Data\mitmdump-out.log"; $se = "$Data\mitmdump-err.log"
+      $child = Start-Process -FilePath $exe -ArgumentList $arg -PassThru -WindowStyle Hidden `
+                 -RedirectStandardOutput $so -RedirectStandardError $se -ErrorAction Stop
+      # The server mitmdump re-executes inherits the job, so the whole tree is covered.
+      # Its own try: a job-object problem must not be reported as a failed launch and
+      # send a perfectly good proxy round the retry loop.
+      try {
+        if (-not [KidJob]::Add($Job, $child.Handle)) { Note "  (job object refused - relying on tree teardown)" }
+        AdoptTree $child.Id
+      } catch { Note "  (job object unavailable - relying on tree teardown)" }
+    } catch {
+      $fails++
+      Note "  could not launch: $($_.Exception.Message) (attempt $fails)"
+      Start-Sleep -Seconds ([math]::Min(300, 15 * $fails))
+      if ($fails -ge $FailOpenAfter) { break }
+      continue
+    }
+
+    # -------------------------------------------------- wait for it to really answer
+    $t0 = Get-Date
+    $ready = $false
+    while (((Get-Date) - $t0).TotalSeconds -lt $MaxStartSeconds) {
+      AdoptTree $child.Id
+      Start-Sleep -Seconds 3
+      if ($child.HasExited) { Note "  exited straight away, code $($child.ExitCode)"; break }
+      if (Serving) { $ready = $true; break }
+    }
+    AdoptTree $child.Id
+
+    if ($ready) {
+      $fails = 0
+      $owner = PortOwner
+      Note "  ready in $([int]((Get-Date) - $t0).TotalSeconds)s, bootstrap pid $($child.Id), serving pid $owner"
+      SweepStrays $owner
+    } else {
+      $fails++
+      if (-not $child.HasExited) {
+        Note "  still not answering after ${MaxStartSeconds}s - stopping it (attempt $fails)"
+        KillTree $child.Id
+      } else {
+        Note "  start failed (attempt $fails), exit code $($child.ExitCode)"
+        foreach ($f in $se, $so) {
+          if ((Test-Path $f) -and (Get-Item $f).Length) {
+            Get-Content $f -Tail 5 | ForEach-Object { Note "    $_" }
+          }
+        }
+      }
+      if ($fails -ge $FailOpenAfter) { break }
+      $back = [math]::Min(300, 15 * $fails)
+      Note "  retrying in ${back}s"
+      Start-Sleep -Seconds $back
+    }
+  }
+
+  # ------------------------------------------------------ worst case: stand down
+  # Repeated failures mean nobody in the house can browse. Leaving the machine
+  # pointed at a proxy that will not start is the one outcome worse than not
+  # filtering at all, so hand the machine back and say so loudly.
+  Note "GIVING UP after $fails failed starts - pausing GreenGate so this machine still works"
+  Note "filtering is OFF until someone runs: greengate resume"
+  if (Test-Path "$Dir\greengate-pause.ps1") {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$Dir\greengate-pause.ps1" -Port $Port
+  }
+
+} finally {
+  # The proxy is our child - do not leave it running without a supervisor.
+  if ($child -and -not $child.HasExited) {
+    Note "supervisor stopping - taking mitmdump (tree of pid $($child.Id)) with it"
+    KillTree $child.Id
+  }
+  try { $mutex.ReleaseMutex() } catch { }
+  $mutex.Dispose()
+}

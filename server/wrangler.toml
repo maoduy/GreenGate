@@ -1,0 +1,31 @@
+# GreenGate relay - Cloudflare Worker + one Durable Object per device.
+# Deploy:  npx wrangler login   (once, by the account owner)   then   npx wrangler deploy
+name = "greengate-relay"
+main = "src/index.ts"
+compatibility_date = "2025-10-01"
+
+[observability]
+enabled = true
+
+[[durable_objects.bindings]]
+name = "DEVICE"
+class_name = "DeviceDO"
+
+[[durable_objects.bindings]]
+name = "PAIRING"
+class_name = "PairingDO"
+
+[[durable_objects.bindings]]
+name = "SHEET"
+class_name = "SheetDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DeviceDO", "PairingDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["SheetDO"]
+
+# Custom domain later: uncomment and point the zone at Cloudflare.
+# routes = [{ pattern = "relay.greengate.example", custom_domain = true }]

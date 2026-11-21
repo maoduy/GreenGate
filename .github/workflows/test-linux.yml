@@ -1,0 +1,98 @@
+name: Test on Linux
+
+# Real systemd, real nftables, a real child account: build the .deb, install it, point it at the
+# sheet, probe as the child (transparent, no proxy setting anywhere) and as an unfiltered account,
+# measure the latency cost, then uninstall and prove nothing is left.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: 'Control sheet id or link'
+        required: true
+        default: '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs'
+  push:
+    branches: [main]
+    paths: ['proxy/**', 'linux/**', '.github/workflows/test-linux.yml']
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unit tests
+        run: python3 test/timewindow_test.py && python3 test/policy_test.py
+
+      - name: Build the .deb
+        run: linux/build-deb.sh dist && dpkg-deb -I dist/*.deb | head -12
+
+      - name: Install the package and set it up for a child account
+        run: |
+          sudo useradd -m kid && sudo useradd -m parent
+          sudo apt-get install -y -qq ./dist/greengate_*.deb
+          sudo greengate-setup --sheet "${{ inputs.sheet || '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs' }}" --users kid
+          systemctl --no-pager status greengate.service | head -5
+          sudo nft list table inet greengate
+
+      - name: Probe as the child and as the parent
+        run: |
+          for i in $(seq 1 45); do sudo grep -q "lists loaded" /var/lib/greengate/greengate.log 2>/dev/null && break; sleep 2; done
+          sudo grep -c "lists loaded" /var/lib/greengate/greengate.log || echo "::warning::sheet not loaded after 90 s"
+          t() { printf "%-45s %s\n" "$2" "$(sudo -u $1 curl -s -o /dev/null -w '%{http_code}' --max-time 25 -H 'Sec-Fetch-Dest: document' -A 'Mozilla/5.0' "$2")"; }
+          echo "--- kid (transparent) ---"; t kid https://www.google.com/; t kid https://example.com/; t kid https://www.youtube.com/shorts/x
+          echo "--- parent (untouched) ---"; t parent https://example.com/
+          kid_listed=$(sudo -u kid curl -s -o /dev/null -w '%{http_code}' --max-time 25 -H 'Sec-Fetch-Dest: document' -A 'Mozilla/5.0' https://www.google.com/)
+          kid_un=$(sudo -u kid curl -s -o /dev/null -w '%{http_code}' --max-time 25 -H 'Sec-Fetch-Dest: document' -A 'Mozilla/5.0' https://example.com/)
+          par_un=$(sudo -u parent curl -s -o /dev/null -w '%{http_code}' --max-time 25 https://example.com/)
+          marker=$(sudo -u kid curl -s --max-time 25 -H 'Sec-Fetch-Dest: document' https://example.com/ | grep -c greengate-block || true)
+          fail=0
+          [[ "$kid_listed" =~ ^(2|3) ]] || { echo "FAIL: kid blocked on a listed site ($kid_listed)"; fail=1; }
+          [[ "$kid_un" == "403" && "$marker" -ge 1 ]] || { echo "FAIL: kid not blocked with the GreenGate page ($kid_un, marker $marker)"; fail=1; }
+          [[ "$par_un" =~ ^(2|3) ]] || { echo "FAIL: parent affected ($par_un)"; fail=1; }
+          echo "| Linux (Ubuntu 24.04) | kid $kid_listed/$kid_un | parent -/$par_un | $([[ $fail -eq 0 ]] && echo PASS || echo FAIL) |" >> $GITHUB_STEP_SUMMARY
+          exit $fail
+
+      - name: Self-test and status
+        run: |
+          sudo greengate test kid
+          greengate json | python3 -m json.tool | head -30
+
+      - name: Latency as the child, direct vs GreenGate
+        run: |
+          m() { for i in 1 2 3 4 5 6 7 8; do sudo -u kid curl -s -o /dev/null -w '%{time_total}\n' --max-time 40 -H 'Sec-Fetch-Dest: document' -A 'Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0' "$1"; done | sort -n | sed -n 4p; }
+          echo "| Trang (Linux, curl, median of 8) | Truc tiep | Qua GreenGate | Chenh lech |" | tee -a $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|---|" | tee -a $GITHUB_STEP_SUMMARY
+          for u in https://www.google.com/ https://en.wikipedia.org/wiki/Main_Page https://www.ted.com/ https://www.khanacademy.org/ https://www.youtube.com/ "https://www.youtube.com/watch?v=LmszJQzuAcc"; do
+            on=$(m "$u"); sudo /usr/local/lib/greengate/nft-apply.sh --remove >/dev/null; off=$(m "$u"); sudo /usr/local/lib/greengate/nft-apply.sh >/dev/null
+            python3 -c "off=$off*1000; on=$on*1000; print('| %s | %.0f ms | %.0f ms | %+.0f ms |' % ('$u', off, on, on-off))" | tee -a $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Watchdog recovers a killed proxy
+        run: |
+          sudo pkill -f mitmdump; sleep 3
+          for i in $(seq 1 20); do c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -x http://127.0.0.1:8081 http://greengate.local/ || true); [[ "$c" == "200" ]] && break; sleep 2; done
+          echo "back after ~$((i*2))s: $c"; [[ "$c" == "200" ]]
+
+      - name: Scheduled screenshots - consent and Drive upload against a local mock (SPEC §8)
+        run: |
+          python3 test/mock_upload.py --port 18796 --root /tmp/shots-mock > /tmp/mock-upload.log 2>&1 &
+          sleep 1
+          sudo -u kid /opt/greengate/venv/bin/python /opt/greengate/agent/greengate_agent.py consent --parent --child | tail -1
+          sudo -u kid /opt/greengate/venv/bin/python /opt/greengate/agent/greengate_agent.py drive --set http://127.0.0.1:18796/exec --test | tail -2
+          test -n "$(find /tmp/shots-mock -name '*.jpg' | head -1)"
+
+      - name: Logs
+        if: always()
+        run: |
+          sudo journalctl -u greengate.service --no-pager -n 30 || true
+          sudo tail -n 30 /var/lib/greengate/greengate.log || true
+
+      - name: Uninstall and verify clean
+        if: always()
+        run: |
+          sudo apt-get remove -y -qq greengate || sudo /usr/local/lib/greengate/uninstall.sh || true
+          left=""
+          for p in /opt/greengate /etc/greengate /var/lib/greengate /usr/local/bin/greengate /etc/systemd/system/greengate.service; do [[ -e "$p" ]] && left="$left $p"; done
+          sudo nft list table inet greengate >/dev/null 2>&1 && left="$left nft-table"
+          [[ -z "$left" ]] && echo "machine clean" || { echo "LEFT BEHIND:$left"; exit 1; }

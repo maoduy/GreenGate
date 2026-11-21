@@ -1,0 +1,154 @@
+name: Test on real Windows
+
+# Installs GreenGate on a clean Windows VM and drives it, so the things that only exist
+# on Windows get exercised before anyone runs this on a family PC: the scheduled task,
+# the addon loading, the data directory, the sheet fetch, and above all the lookup that
+# decides WHICH USER a connection belongs to - the part that decides who gets blocked.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sheet:
+        description: 'Control sheet id or link'
+        required: true
+        default: '1VtlZ1FJlUmRQ3VDx7Gzlve7LZ-oHo79P9iFbNj-9VCs'
+
+env:
+  MITM_VERSION: '12.2.3'
+  KIDUSER: 'kidtest'
+  KIDPASS: 'K1dN3st-Test!2026'
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stage the payload exactly as the installer expects
+        shell: pwsh
+        run: |
+          $url = "https://downloads.mitmproxy.org/$env:MITM_VERSION/mitmproxy-$env:MITM_VERSION-windows-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile mitm.zip -UseBasicParsing
+          Expand-Archive mitm.zip -DestinationPath mitm -Force
+          New-Item -ItemType Directory -Force -Path payload | Out-Null
+          Copy-Item mitm\mitmdump.exe payload\ -Force
+          Copy-Item proxy\*.ps1, proxy\*.py, proxy\*.cmd payload\ -Force
+          Copy-Item setup\reset-clean.ps1, setup\GreenGate-Unlock.bat payload\ -Force
+
+      - name: Create a standard user to stand in for the kid
+        shell: pwsh
+        run: |
+          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
+          New-LocalUser -Name $env:KIDUSER -Password $sec -AccountNeverExpires -PasswordNeverExpires | Out-Null
+          Add-LocalGroupMember -Group "Users" -Member $env:KIDUSER
+          # no logon on purpose: the account has no profile yet, install.ps1 must create it
+          Write-Host "created $env:KIDUSER"
+
+      - name: Install
+        shell: pwsh
+        run: |
+          .\payload\install.ps1 -SheetId "${{ inputs.sheet }}" -EnforceUsers $env:KIDUSER
+        continue-on-error: true
+
+      - name: The log - does the addon run at all?
+        if: always()
+        shell: pwsh
+        run: |
+          Start-Sleep -Seconds 10
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          Write-Host "=============== greengate.log ==============="
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** NO LOG AT ALL ***" }
+          Write-Host "============================================"
+          Write-Host "mitmdump: $(if (Get-Process mitmdump -EA SilentlyContinue) { 'RUNNING' } else { 'NOT RUNNING' })"
+          Write-Host "listening on 8080: $((Test-NetConnection 127.0.0.1 -Port 8080 -InformationLevel Quiet -WarningAction SilentlyContinue))"
+          Write-Host "--- C:\ProgramData\GreenGate ---"
+          Get-ChildItem C:\ProgramData\GreenGate -Recurse -EA SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: Is the administrator left alone?
+        if: always()
+        shell: pwsh
+        run: |
+          # The whole point of per-account routing: this machine's admin must be untouched.
+          $edge = Get-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Edge" -EA SilentlyContinue
+          Write-Host "HKLM Edge ProxyMode   : $($edge.ProxyMode)   (must be empty)"
+          $is = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings" -EA SilentlyContinue
+          Write-Host "HKLM ProxyEnable      : $($is.ProxyEnable)   (must be 0 or empty)"
+          $sid = (New-Object Security.Principal.NTAccount($env:KIDUSER)).Translate([Security.Principal.SecurityIdentifier]).Value
+          New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS -EA SilentlyContinue | Out-Null
+          $loaded = $false
+          if (-not (Test-Path "HKU:\$sid")) { & reg.exe load "HKU\$sid" "C:\Users\$env:KIDUSER\NTUSER.DAT" *>$null; $loaded = $true }
+          $k = Get-ItemProperty "HKU:\$sid\Software\Policies\Microsoft\Edge" -EA SilentlyContinue
+          Write-Host "kid Edge ProxyMode    : $($k.ProxyMode)   (must be fixed_servers)"
+          Write-Host "kid Edge ProxyServer  : $($k.ProxyServer)"
+          if ($loaded) { [gc]::Collect(); & reg.exe unload "HKU\$sid" *>$null }
+
+      - name: Who does the proxy think is connecting?
+        if: always()
+        shell: pwsh
+        run: |
+          # The lookup that cannot be tested anywhere but on Windows. If it returns nothing,
+          # every connection is treated as unknown and fails closed - blocking everybody.
+          $lines = @(
+            '@echo off',
+            'curl.exe -s -o NUL -w "  wayground.com (listed)    -> %%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://wayground.com/',
+            'echo.',
+            'curl.exe -s -o NUL -w "  minecraft.net (unlisted)  -> %%{http_code}" --max-time 25 -x http://127.0.0.1:8080 -k https://www.minecraft.net/',
+            'echo.'
+          )
+          Set-Content C:\probe.cmd $lines -Encoding ASCII
+          icacls C:\probe.cmd /grant "${env:KIDUSER}:(RX)" *>$null
+
+          Write-Host "--- as the ADMINISTRATOR (not enforced: expect both to pass) ---"
+          & cmd.exe /c C:\probe.cmd
+
+          Write-Host "--- as $env:KIDUSER (enforced: expect 200 then 403) ---"
+          $out = "C:\Users\Public\kidout.txt"
+          Remove-Item $out -Force -EA SilentlyContinue
+          Set-Content C:\kidrun.cmd @("@echo off", "call C:\probe.cmd > $out 2>&1") -Encoding ASCII
+          icacls C:\kidrun.cmd /grant "${env:KIDUSER}:(RX)" *>$null
+          icacls C:\Users\Public /grant "${env:KIDUSER}:(OI)(CI)M" *>$null
+          $sec = ConvertTo-SecureString $env:KIDPASS -AsPlainText -Force
+          $c = New-Object PSCredential($env:KIDUSER, $sec)
+          try {
+            Start-Process cmd.exe -Credential $c -ArgumentList "/c","C:\kidrun.cmd" -LoadUserProfile -Wait -EA Stop
+          } catch { Write-Host "  could not start as $env:KIDUSER : $($_.Exception.Message)" }
+          Start-Sleep -Seconds 3
+          if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { Get-Content $out }
+          else { Write-Host "  *** no output captured from $env:KIDUSER ***" }
+
+      - name: The log again - what did it decide, and for whom?
+        if: always()
+        shell: pwsh
+        run: |
+          $log = "C:\ProgramData\GreenGate\greengate.log"
+          Write-Host "=============== greengate.log ==============="
+          if (Test-Path $log) { Get-Content $log } else { Write-Host "*** STILL NO LOG ***" }
+          Write-Host "============================================"
+          Write-Host "The name in brackets on each BLOCK line is the user lookup result."
+          Write-Host "'(None)' there means the lookup failed and everyone gets blocked."
+
+      - name: diagnose.ps1
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\diagnose.ps1
+          $f = Join-Path ([Environment]::GetFolderPath("Desktop")) "greengate-diagnose.txt"
+          if (Test-Path $f) { Get-Content $f }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-evidence
+          path: |
+            C:\ProgramData\GreenGate\greengate.log
+            C:\Users\runneradmin\Desktop\greengate-diagnose.txt
+          if-no-files-found: warn
+
+      - name: Uninstall and confirm the machine is clean
+        if: always()
+        shell: pwsh
+        run: |
+          .\payload\reset-clean.ps1
+          Write-Host "tasks left : $((Get-ScheduledTask -TaskName GreenGate -EA SilentlyContinue) -ne $null)"
+          Write-Host "folder left: $(Test-Path 'C:\Program Files\GreenGate')"
+          Write-Host "data left  : $(Test-Path 'C:\ProgramData\GreenGate')"

@@ -1,0 +1,6 @@
+PyNaCl==1.6.2
+websocket-client==1.9.2
+mss==10.2.0
+Pillow==13.0.0
+requests==2.34.2
+qrcode==8.2

@@ -58,6 +58,9 @@ table inet greengate {
   chain filter {
     type filter hook output priority 0; policy accept;
     meta skuid @kids oifname "lo" accept
+    # replies of connections that came IN (a server the account runs, e.g. a dev server on the LAN);
+    # the account still cannot open any new outgoing connection.
+    meta skuid @kids ct direction reply accept
     meta skuid @kids ct status dnat accept
     meta skuid @kids ip daddr 127.0.0.1 tcp dport $PORT accept
     meta skuid @kids ip6 daddr ::1 tcp dport $PORT accept
